@@ -7,15 +7,10 @@ const CONFIG = {
     return `https://cdn.jsdelivr.net/gh/${this.GITHUB_USER}/${this.GITHUB_REPO}@${this.GITHUB_BRANCH}/data/podcasts.json`;
   },
   
-  get FALLBACK_URL() {
-    return `https://cdn.jsdelivr.net/gh/${this.GITHUB_USER}/${this.GITHUB_REPO}@latest/data/podcasts.json`;
-  },
-
   CACHE_KEY: 'podcasts_cache',
   CACHE_DURATION: 60 * 60 * 1000, 
   PODCASTS_PER_PAGE: 12,
-  RETRY_ATTEMPTS: 3,
-  RETRY_DELAY: 1000
+  TIMEOUT: 10000, 
 };
 
 const UI = {
@@ -24,18 +19,19 @@ const UI = {
   coverImage: '../../podcast/images/podcast-cover.jpg'
 };
 
-let dati = {
-  listaPodcast: [],
+
+let appState = {
+  podcasts: [],
   isLoading: false,
-  error: null
+  error: null,
+  currentPage: 1,
+  currentlyPlayingAudio: null
 };
 
-let paginaAtuale = 1;
-let currentlyPlayingAudio = null;
 
 const intersectionObserver = new IntersectionObserver(
-  entries => {
-    entries.forEach(entry => {
+  (entries) => {
+    entries.forEach((entry) => {
       entry.target.classList.toggle('show', entry.isIntersecting);
     });
   },
@@ -43,189 +39,31 @@ const intersectionObserver = new IntersectionObserver(
 );
 
 
-function getCorsErrorMessage(error) {
-  const message = error.message.toLowerCase();
-  
-  if (message.includes('cors')) {
-    return `
-      ❌ <strong>Erro de CORS</strong>
-      <br/>O jsDelivr deveria permitir CORS automaticamente. 
-      <br/>Verifique a URL do repositório GitHub.
-    `;
-  }
-  
-  if (message.includes('404') || message.includes('not found')) {
-    return `
-      ❌ <strong>Arquivo não encontrado</strong>
-      <br/>Verifique:
-      <br/>• Se o arquivo está em: <code>/data/podcasts.json</code>
-      <br/>• Se o repositório é público
-      <br/>• Se o branch é: <code>${CONFIG.GITHUB_BRANCH}</code>
-    `;
-  }
-  
-  if (message.includes('network') || message.includes('failed to fetch')) {
-    return '❌ <strong>Erro de rede:</strong> Verifique sua conexão ou GitHub está offline';
-  }
-  
-  return `❌ <strong>Erro:</strong> ${error.message}`;
+function escapeHtml(text) {
+  if (!text || typeof text !== 'string') return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
-
-function showError(message) {
-  dati.error = message;
-  const $tabela = document.querySelector(UI.tableSelector);
-  if ($tabela) {
-    $tabela.innerHTML = `
-      <div class="error-message" style="padding: 20px; text-align: center; color: #d32f2f; background: #ffebee; border-radius: 4px; margin: 20px;">
-        ${message}
-        <br/><br/>
-        <strong>URL tentada:</strong>
-        <br/><code style="background: #f5f5f5; padding: 8px; border-radius: 4px; display: block; margin: 10px 0; word-break: break-all;">
-          ${CONFIG.CDN_URL}
-        </code>
-        <br/>
-        <button onclick="retryLoadPodcasts()" style="margin-top: 10px; padding: 8px 16px; cursor: pointer; background: #2196F3; color: white; border: none; border-radius: 4px;">
-          🔄 Tentar Novamente
-        </button>
-      </div>`;
-  }
-}
-
-function showLoading() {
-  dati.isLoading = true;
-  const $tabela = document.querySelector(UI.tableSelector);
-  if ($tabela) {
-    $tabela.innerHTML = `
-      <div style="padding: 40px; text-align: center;">
-        <p>⏳ Carregando podcasts de jsDelivr...</p>
-        <div style="display: inline-block; width: 40px; height: 40px; border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; animation: spin 1s linear infinite;"></div>
-      </div>
-      <style>
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-      </style>`;
-  }
-}
-
-async function fetchPodcastsWithRetry(url, attempt = 1) {
-  console.log(`📡 Tentativa ${attempt}: Carregando de jsDelivr`);
-  console.log(`   URL: ${url}`);
-  
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-      },
-      cache: 'force-cache',
-      signal: controller.signal
-    });
-
-    clearTimeout(timeout);
-
-    const corsHeader = response.headers.get('Access-Control-Allow-Origin');
-    console.log(`✅ CORS habilitado: ${corsHeader}`);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const contentType = response.headers.get('content-type');
-    if (!contentType?.includes('application/json')) {
-      throw new Error('Resposta não é JSON válido');
-    }
-
-    const data = await response.json();
-
-    if (!Array.isArray(data) && !Array.isArray(data.podcasts)) {
-      throw new Error('Formato de JSON inválido');
-    }
-
-    console.log(`✅ Carregamento bem-sucedido! ${Array.isArray(data) ? data.length : data.podcasts.length} podcasts encontrados`);
-    return Array.isArray(data) ? data : data.podcasts;
-
-  } catch (error) {
-    console.error(`❌ Tentativa ${attempt} falhou:`, error);
-
-    if (attempt === 1 && url === CONFIG.CDN_URL) {
-      console.log('🔄 Tentando URL de fallback (latest)...');
-      await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY));
-      return fetchPodcastsWithRetry(CONFIG.FALLBACK_URL, 2);
-    }
-
-    throw error;
-  }
-}
-
-async function loadPodcasts() {
-  showLoading();
-
-  try {
-    let podcasts = getFromCache();
-    if (podcasts) {
-      console.log('💾 Usando podcasts em cache');
-      dati.listaPodcast = sortPodcasts(podcasts);
-      dati.isLoading = false;
-      renderPodcasts();
-      renderPaginacao();
-      return;
-    }
-
-    podcasts = await fetchPodcastsWithRetry(CONFIG.CDN_URL);
-
-    if (!Array.isArray(podcasts) || podcasts.length === 0) {
-      throw new Error('Nenhum podcast encontrado');
-    }
-
-    podcasts = podcasts.map(p => ({
-      data: p.data || '',
-      tit: p.tit || 'Sem título',
-      intervistato: p.intervistato || '',
-      descrizione: p.descrizione || '',
-      audio: p.audio || ''
-    }));
-
-    dati.listaPodcast = sortPodcasts(podcasts);
-    saveToCache(podcasts);
-
-    dati.isLoading = false;
-    renderPodcasts();
-    renderPaginacao();
-
-    console.log(`✅ ${dati.listaPodcast.length} podcasts carregados com sucesso`);
-
-  } catch (error) {
-    console.error('❌ Erro ao carregar podcasts:', error);
-    dati.isLoading = false;
-    showError(getCorsErrorMessage(error));
-  }
-}
-
-function retryLoadPodcasts() {
-  localStorage.removeItem(CONFIG.CACHE_KEY);
-  loadPodcasts();
-}
-
 
 function getFromCache() {
-  const cached = localStorage.getItem(CONFIG.CACHE_KEY);
-  if (!cached) return null;
-
   try {
+    const cached = localStorage.getItem(CONFIG.CACHE_KEY);
+    if (!cached) return null;
+
     const { data, timestamp } = JSON.parse(cached);
-    if (Date.now() - timestamp > CONFIG.CACHE_DURATION) {
+    const isExpired = Date.now() - timestamp > CONFIG.CACHE_DURATION;
+
+    if (isExpired) {
       localStorage.removeItem(CONFIG.CACHE_KEY);
+      console.log('⏰ Cache expirou');
       return null;
     }
-    console.log('💾 Cache válido encontrado');
+
+    console.log('✅ Cache válido encontrado');
     return data;
   } catch (error) {
+    console.error('❌ Erro ao ler cache:', error);
     localStorage.removeItem(CONFIG.CACHE_KEY);
     return null;
   }
@@ -240,153 +78,344 @@ function saveToCache(data) {
         timestamp: Date.now()
       })
     );
-    console.log('💾 Podcasts salvos em cache');
+    console.log('💾 Cache salvo com sucesso');
   } catch (error) {
-    console.error('Erro ao salvar cache:', error);
+    console.error('❌ Erro ao salvar cache:', error);
   }
 }
 
-function escapeHtml(text) {
-  if (!text) return '';
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+async function fetchPodcasts(url) {
+  console.log(`🌐 Carregando de: ${url}`);
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      cache: 'force-cache',
+      signal: controller.signal
+    });
+
+    clearTimeout(timeout);
+
+    const corsHeader = response.headers.get('Access-Control-Allow-Origin');
+    console.log(`📋 CORS: ${corsHeader || 'não configurado'}`);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const contentType = response.headers.get('content-type');
+    if (!contentType?.includes('application/json')) {
+      throw new Error('Resposta não é JSON válido');
+    }
+
+    const data = await response.json();
+
+    if (!Array.isArray(data)) {
+      throw new Error('JSON deve ser um array de podcasts');
+    }
+
+    if (data.length === 0) {
+      throw new Error('Nenhum podcast encontrado no JSON');
+    }
+
+    console.log(`✅ ${data.length} podcasts carregados com sucesso`);
+    return data;
+
+  } catch (error) {
+    console.error(`❌ Erro ao carregar JSON:`, error.message);
+    throw error;
+  }
 }
 
-const podcastDiv = (podcast) => `
-  <div id="pod" class="row">
-    <div class="grid">
-      <div class="icon">
-        <img src="${UI.coverImage}" alt="Podcast icon" class="img-responsive" loading="lazy"/>
-      </div>
-      <div class="info">
-        <span class="data">${escapeHtml(podcast.data)}</span>
-        <h2>
-          ${escapeHtml(podcast.tit)}
-          <span class="sub-tit">${escapeHtml(podcast.intervistato)}</span>
-        </h2>
-        <p>${escapeHtml(podcast.descrizione)}</p>
-        <div class="podcast">
-          <audio controls data-listeners-attached="false">
-            <source class="pod-mp3" src="https://www.meusite.com/podcast/sociale/${escapeHtml(podcast.audio)}"/>
-          </audio>
-        </div>
-      </div>
-    </div>
-  </div>`;
 
 function sortPodcasts(podcasts) {
   return podcasts
-    .map(p => ({
+    .map((p) => ({
       ...p,
       dateObj: new Date(p.data.split('.').reverse().join('-'))
     }))
-    .sort((a, b) => b.dateObj - a.dateObj)
-    .map(({ dateObj, ...rest }) => rest);
+    .sort((a, b) => b.dateObj - a.dateObj) 
+    .map(({ dateObj, ...rest }) => rest); 
 }
+
+
+function createPodcastElement(podcast) {
+  return `
+    <div class="row">
+      <div class="grid">
+        <div class="icon">
+          <img 
+            src="${escapeHtml(UI.coverImage)}" 
+            alt="Podcast cover" 
+            class="img-responsive"
+            loading="lazy"
+          />
+        </div>
+        <div class="info">
+          <span class="data">${escapeHtml(podcast.data)}</span>
+          <h2>
+            ${escapeHtml(podcast.tit)}
+            <span class="sub-tit">${escapeHtml(podcast.intervistato)}</span>
+          </h2>
+          <p>${escapeHtml(podcast.descrizione)}</p>
+          <div class="podcast">
+            <audio controls data-podcast-audio="true">
+              <source 
+                src="https://www.meusite.com/podcast/sociale/${escapeHtml(podcast.audio)}"
+                type="audio/mpeg"
+              />
+              Seu navegador não suporta áudio.
+            </audio>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
 
 function attachAudioListeners() {
-  document.querySelectorAll('.podcast audio[data-listeners-attached="false"]').forEach(audio => {
-    audio.addEventListener('play', handleAudioClick);
-    audio.setAttribute('data-listeners-attached', 'true');
-  });
-}
+  const audioElements = document.querySelectorAll('[data-podcast-audio="true"]');
+  
+  audioElements.forEach((audio) => {
+    if (audio.dataset.listenerAttached === 'true') return;
 
-function handleAudioClick(event) {
-  const clickedAudio = event.currentTarget;
-  if (clickedAudio instanceof HTMLAudioElement) {
-    if (currentlyPlayingAudio && currentlyPlayingAudio !== clickedAudio) {
-      currentlyPlayingAudio.pause();
-    }
-    currentlyPlayingAudio = clickedAudio;
-  }
+    audio.addEventListener('play', (event) => {
+      // Pausar outro áudio se estiver tocando
+      if (appState.currentlyPlayingAudio && appState.currentlyPlayingAudio !== audio) {
+        appState.currentlyPlayingAudio.pause();
+      }
+      appState.currentlyPlayingAudio = audio;
+      console.log('🔊 Tocando áudio');
+    });
+
+    audio.dataset.listenerAttached = 'true';
+  });
 }
 
 function renderPodcasts() {
   const $tabela = document.querySelector(UI.tableSelector);
-  if (!$tabela) return;
+  if (!$tabela) {
+    console.error('❌ Elemento #tabela não encontrado');
+    return;
+  }
 
-  const podcastsInicio = (paginaAtuale - 1) * CONFIG.PODCASTS_PER_PAGE;
-  const podcastsFinale = podcastsInicio + CONFIG.PODCASTS_PER_PAGE;
+  const startIndex = (appState.currentPage - 1) * CONFIG.PODCASTS_PER_PAGE;
+  const endIndex = startIndex + CONFIG.PODCASTS_PER_PAGE;
+  const podcastsToShow = appState.podcasts.slice(startIndex, endIndex);
 
-  $tabela.innerHTML = dati.listaPodcast
-    .slice(podcastsInicio, podcastsFinale)
-    .map(podcastDiv)
+
+  $tabela.innerHTML = podcastsToShow
+    .map((podcast) => createPodcastElement(podcast))
     .join('');
 
-  document.querySelectorAll('.row').forEach(line => {
-    intersectionObserver.observe(line);
+
+  document.querySelectorAll('.row').forEach((row) => {
+    intersectionObserver.observe(row);
   });
 
   attachAudioListeners();
+
+  console.log(`📄 Página ${appState.currentPage} renderizada`);
 }
 
-function renderPaginacao() {
-  const $paginacao = document.querySelector(UI.paginationSelector);
-  if (!$paginacao) return;
+function renderPagination() {
+  const $pagination = document.querySelector(UI.paginationSelector);
+  if (!$pagination) {
+    console.error('❌ Elemento #paginacao não encontrado');
+    return;
+  }
 
-  const numPagine = Math.ceil(dati.listaPodcast.length / CONFIG.PODCASTS_PER_PAGE);
+  const totalPages = Math.ceil(appState.podcasts.length / CONFIG.PODCASTS_PER_PAGE);
 
-  if (numPagine <= 1) {
-    $paginacao.innerHTML = '';
+  if (totalPages <= 1) {
+    $pagination.innerHTML = '';
     return;
   }
 
   let html = '';
-
-  if (paginaAtuale > 1) {
-    html += `<li class="pagina" data-pagina="${paginaAtuale - 1}">&laquo;</li>`;
+  
+  if (appState.currentPage > 1) {
+    html += `<li class="pagina" data-page="${appState.currentPage - 1}">&laquo;</li>`;
   }
 
-  if (numPagine <= 7) {
-    for (let i = 1; i <= numPagine; i++) {
-      html += `<li class="pagina ${i === paginaAtuale ? 'active' : ''}" data-pagina="${i}">${i}</li>`;
+  if (totalPages <= 7) {
+    for (let i = 1; i <= totalPages; i++) {
+      const activeClass = i === appState.currentPage ? 'active' : '';
+      html += `<li class="pagina ${activeClass}" data-page="${i}">${i}</li>`;
     }
   } else {
-    html += `<li class="pagina" data-pagina="1">1</li>`;
-    if (paginaAtuale > 4) html += `<li class="pagina disabled">...</li>`;
+    html += `<li class="pagina" data-page="1">1</li>`;
 
-    const startPage = Math.max(2, Math.min(paginaAtuale - 1, numPagine - 5));
-    const endPage = Math.min(numPagine - 1, Math.max(paginaAtuale + 1, 6));
-
-    for (let i = startPage; i <= endPage; i++) {
-      html += `<li class="pagina ${i === paginaAtuale ? 'active' : ''}" data-pagina="${i}">${i}</li>`;
+    if (appState.currentPage > 4) {
+      html += `<li class="pagina disabled">...</li>`;
     }
 
-    if (paginaAtuale < numPagine - 3) html += `<li class="pagina disabled">...</li>`;
-    html += `<li class="pagina" data-pagina="${numPagine}">${numPagine}</li>`;
+    const startPage = Math.max(2, appState.currentPage - 1);
+    const endPage = Math.min(totalPages - 1, appState.currentPage + 1);
+
+    for (let i = startPage; i <= endPage; i++) {
+      const activeClass = i === appState.currentPage ? 'active' : '';
+      html += `<li class="pagina ${activeClass}" data-page="${i}">${i}</li>`;
+    }
+
+    if (appState.currentPage < totalPages - 3) {
+      html += `<li class="pagina disabled">...</li>`;
+    }
+
+    html += `<li class="pagina" data-page="${totalPages}">${totalPages}</li>`;
   }
 
-  if (paginaAtuale < numPagine) {
-    html += `<li class="pagina" data-pagina="${paginaAtuale + 1}">&raquo;</li>`;
+  if (appState.currentPage < totalPages) {
+    html += `<li class="pagina" data-page="${appState.currentPage + 1}">&raquo;</li>`;
   }
 
-  $paginacao.innerHTML = html;
+  $pagination.innerHTML = html;
+
+  $pagination.querySelectorAll('[data-page]').forEach((button) => {
+    button.addEventListener('click', handlePaginationClick);
+  });
+
+  console.log(`📑 Paginação renderizada (${totalPages} páginas)`);
 }
 
-function handlePaginaClick(event) {
-  if (!event.target.classList.contains('pagina') || event.target.classList.contains('disabled')) return;
+function handlePaginationClick(event) {
+  const page = parseInt(event.target.dataset.page, 10);
 
-  const activePage = document.querySelector('.pagina.active');
-  if (activePage) activePage.classList.remove('active');
+  if (isNaN(page)) return;
 
-  event.target.classList.add('active');
-  paginaAtuale = parseInt(event.target.dataset.pagina, 10);
+  appState.currentPage = page;
 
-  document.querySelector(UI.tableSelector).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.querySelector(UI.tableSelector)?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start'
+  });
 
   renderPodcasts();
-  renderPaginacao();
+  renderPagination();
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+function showLoading() {
+  const $tabela = document.querySelector(UI.tableSelector);
+  if (!$tabela) return;
+
+  $tabela.innerHTML = `
+    <div style="padding: 40px; text-align: center; color: #666;">
+      <p style="font-size: 1.2em;">⏳ Carregando podcasts...</p>
+      <div style="display: inline-block; width: 50px; height: 50px; border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+      <style>
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      </style>
+    </div>`;
+}
+
+function showError(error) {
+  const $tabela = document.querySelector(UI.tableSelector);
+  if (!$tabela) return;
+
+  let errorMessage = '❌ Erro desconhecido';
+  let suggestion = '';
+
+  if (error.message.includes('404')) {
+    errorMessage = '❌ Arquivo não encontrado (404)';
+    suggestion = `
+      <br/><strong>Verifique:</strong>
+      <ul style="text-align: left; display: inline-block;">
+        <li>Repositório é público?</li>
+        <li>Arquivo está em: <code>/data/podcasts.json</code></li>
+        <li>Branch correto: <code>${CONFIG.GITHUB_BRANCH}</code></li>
+      </ul>`;
+  } else if (error.message.includes('Failed to fetch') || error.message.includes('Network')) {
+    errorMessage = '❌ Erro de conexão';
+    suggestion = '<br/>Verifique sua internet ou tente novamente em alguns momentos.';
+  } else if (error.message.includes('AbortError')) {
+    errorMessage = '❌ Timeout: Requisição demorou muito';
+    suggestion = '<br/>Tente novamente.';
+  } else if (error.message.includes('JSON')) {
+    errorMessage = '❌ Erro no formato do JSON';
+    suggestion = '<br/>Verifique se o arquivo <code>/data/podcasts.json</code> é um array válido.';
+  } else {
+    errorMessage = `❌ ${error.message}`;
+  }
+
+  $tabela.innerHTML = `
+    <div style="padding: 30px; text-align: center; background: #ffebee; border-radius: 8px; margin: 20px; color: #c62828;">
+      <h3 style="margin: 0 0 15px 0;">${errorMessage}</h3>
+      <p style="font-size: 0.95em; margin: 0 0 15px 0;">${suggestion}</p>
+      
+      <strong>URL do JSON:</strong>
+      <div style="background: #fff; padding: 10px; border-radius: 4px; margin: 10px 0; word-break: break-all; font-family: monospace; font-size: 0.85em;">
+        ${CONFIG.CDN_URL}
+      </div>
+
+      <button 
+        onclick="location.reload()" 
+        style="margin-top: 15px; padding: 10px 20px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em;">
+        🔄 Recarregar Página
+      </button>
+    </div>`;
+};
+
+async function initializePodcasts() {
   console.log('🚀 Iniciando carregamento de podcasts');
   console.log(`📚 Repositório: ${CONFIG.GITHUB_USER}/${CONFIG.GITHUB_REPO}`);
+  console.log(`🌳 Branch: ${CONFIG.GITHUB_BRANCH}`);
   console.log(`🔗 URL: ${CONFIG.CDN_URL}`);
-  
-  loadPodcasts();
-  const paginacao = document.querySelector(UI.paginationSelector);
-  if (paginacao) {
-    paginacao.addEventListener('click', handlePaginaClick);
+
+  appState.isLoading = true;
+  showLoading();
+
+  try {
+    let podcasts = getFromCache();
+
+    if (!podcasts) {
+      console.log('📡 Nenhum cache disponível, carregando de jsDelivr...');
+      podcasts = await fetchPodcasts(CONFIG.CDN_URL);
+    }
+
+    if (!Array.isArray(podcasts) || podcasts.length === 0) {
+      throw new Error('Nenhum podcast encontrado');
+    }
+
+    podcasts = podcasts.map((p) => ({
+      data: escapeHtml(p.data) || '',
+      tit: escapeHtml(p.tit) || 'Sem título',
+      intervistato: escapeHtml(p.intervistato) || '',
+      descrizione: escapeHtml(p.descrizione) || '',
+      audio: escapeHtml(p.audio) || ''
+    }));
+
+    appState.podcasts = sortPodcasts(podcasts);
+
+    saveToCache(podcasts);
+
+    appState.isLoading = false;
+    appState.currentPage = 1;
+    renderPodcasts();
+    renderPagination();
+
+    console.log(`✅ Sucesso! ${appState.podcasts.length} podcasts carregados`);
+
+  } catch (error) {
+    console.error('❌ Erro durante inicialização:', error);
+    appState.isLoading = false;
+    appState.error = error;
+    showError(error);
   }
-});
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initializePodcasts);
+} else {
+  // DOM já foi carregado
+  initializePodcasts();
+}
